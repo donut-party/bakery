@@ -1,12 +1,13 @@
 (ns donut.bakery.inject
   "Compile-time bridge from backend to frontend. ClojureScript macros
   expand in the host JVM; with shadow-cljs embedded in the JVM that runs
-  the backend system, a macro can read the live route registry — no
+  the backend system, a macro can read the live route registry: no
   generated files, no watchers involved in sharing.
 
-  Cache correctness: after a backend restart the monolith dev pipeline
-  touches this file's mtime, which invalidates every cljs namespace that
-  macro-requires it, guaranteeing re-expansion with fresh routes."
+  Cache correctness: after each backend restart `donut.bakery.dev` tells
+  every running shadow build that this macro namespace changed, which
+  recompiles every namespace using it. Builds that use it should also list
+  it in `:cache-blockers` so a new JVM never reuses a cached expansion."
   #?(:cljs (:require-macros [donut.bakery.inject]))
   #?(:clj  (:require [donut.bakery.registry :as registry])))
 

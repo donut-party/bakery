@@ -1,37 +1,62 @@
 (ns donut.bakery.release
-  "Production build in the same one-JVM shape as dev: start the system
-  once (populates the route registry), shadow-cljs release with the
-  inject macro baking routes into the compiled js, tailwind once, then
-  the backend uberjar. No generated files exist at any point."
+  "Production cljs build with the backend routes baked in. One JVM starts
+  just the app's route registry component (and what it depends on; no http
+  server, so it runs fine next to a running dev session), then runs
+  `shadow-cljs release` for each build, so `donut.bakery.inject` macros
+  expand to the real routes. No generated files exist at any point.
+
+  Run it as an exec fn, e.g. with this alias in the app's deps.edn:
+
+    :release {:exec-fn   donut.bakery.release/release
+              :exec-args {:system-ns my-app.backend.system}}
+
+    clojure -X:cljs:release"
   (:require
-   [donut.system.repl :as dsr]))
+   [clojure.java.io :as io]
+   [donut.bakery.registry :as registry]))
 
 (defn- log [& args]
-  (apply println "[monolith]" args))
+  (apply println "[bakery]" args))
 
-(defn- run!*
-  [& cmd]
-  (let [proc (.start (doto (ProcessBuilder. ^java.util.List (vec cmd))
-                       (.inheritIO)))
-        exit (.waitFor proc)]
-    (when-not (zero? exit)
-      (throw (ex-info (str "command failed: " cmd) {:exit exit})))))
+(defn- delete-tree!
+  [^java.io.File f]
+  (when (.isDirectory f)
+    (run! delete-tree! (.listFiles f)))
+  (when (.exists f)
+    (io/delete-file f)))
 
-(defn -main
-  [& _]
-  ;; before any backend code — see the matching require in monolith.dev
-  (require 'cljs.analyzer.api)
-  (log "1/4 starting system once to populate the route registry")
-  (require 'dev)                       ;; auto-starts the system
-  (dsr/stop)                           ;; registry atom keeps its value
-  (log "2/4 shadow-cljs release :app (routes baked in via inject macro)")
-  ((requiring-resolve 'shadow.cljs.devtools.server/start!))
-  ((requiring-resolve 'shadow.cljs.devtools.api/release) :app)
-  ((requiring-resolve 'shadow.cljs.devtools.server/stop!))
-  (log "3/4 tailwind release css")
-  (run!* "npm" "run" "tailwind:release")
-  (log "4/4 backend uberjar")
-  (run!* "clojure" "-T:build" "uber")
-  (log "release complete")
-  (shutdown-agents)
-  (System/exit 0))
+(def defaults
+  {:system    :dev
+   :component [:background :route-registry]
+   :builds    [:app]})
+
+(defn release
+  "Options (all but :system-ns have defaults, see `defaults`):
+  - :system-ns  the ns defining the app's `donut.system/named-system`s
+  - :system     the named system whose routes to bake in
+  - :component  the registry component's path in that system
+  - :builds     shadow-cljs build ids to release"
+  [opts]
+  (let [{:keys [system-ns system component builds]} (merge defaults opts)]
+    (when-not system-ns
+      (throw (ex-info "donut.bakery.release/release needs :system-ns" {:opts opts})))
+    ;; before any backend code; see donut.bakery.dev/-main
+    (require 'cljs.analyzer.api)
+    ;; shadow's persistent cache can skip re-expanding a cached namespace in
+    ;; a fresh JVM, which would ship stale or empty routes
+    (log "deleting .shadow-cljs/")
+    (delete-tree! (io/file ".shadow-cljs"))
+    (log "starting" component "of system" system "to populate the route registry")
+    (require (symbol system-ns))
+    (let [start   (requiring-resolve 'donut.system/start)
+          stop    (requiring-resolve 'donut.system/stop)
+          running (start system {} #{component})]
+      (stop running))
+    (when (nil? @registry/backend-routes)
+      (throw (ex-info "the route registry is empty after starting the system; is the registry component in it?"
+                      {:system system :component component})))
+    (doseq [build builds]
+      (log "shadow-cljs release" build "(routes baked in via donut.bakery.inject)")
+      ((requiring-resolve 'shadow.cljs.devtools.api/release!) build))
+    (log "release complete")
+    (shutdown-agents)))
