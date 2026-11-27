@@ -174,6 +174,19 @@
       (log "reload failed:")
       (println e))))
 
+(defn start-scripts!
+  "Starts every resolved script, then makes the shadow watches recompile the
+  namespaces that use `donut.bakery.inject` once. A watch's first build can
+  reuse a cached expansion from an earlier compile made without a backend
+  (a standalone `shadow-cljs compile`), where the route registry was
+  empty; `:cache-blockers` does not catch that, because the macro file
+  itself did not change. The one recompile re-expands with this JVM's
+  routes."
+  [resolved]
+  (run! start-script! resolved)
+  (when (some (comp scripts/shadow-build-id second) resolved)
+    (recompile-inject-users!)))
+
 (defn- on-change
   [{:keys [path]}]
   (when (and (re-find source-file-re (str path))
@@ -200,7 +213,7 @@
     (require 'dev)
     (start-nrepl!)
     (log "scripts:" (mapv first resolved))
-    (run! start-script! resolved)
+    (start-scripts! resolved)
     (beholder/watch on-change "src" "resources" "dev/src" "test")
     (log "ready; watching src resources dev/src test (.clj/.cljc/.edn)"))
   @(promise))
